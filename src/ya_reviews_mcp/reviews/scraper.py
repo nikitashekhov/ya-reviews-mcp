@@ -49,6 +49,17 @@ SEL_COMPANY_REVIEW_COUNT = "meta[itemprop='reviewCount']"
 SEL_COMPANY_ADDRESS = "[class*='business-contacts-view__address-link']"
 SEL_COMPANY_CATEGORIES = ".business-categories-view__category"
 
+# Review sort dropdown (top-right of reviews list)
+SEL_SORT_TRIGGER = ".rating-ranking-view"
+SEL_SORT_POPUP = ".rating-ranking-view__popup"
+SEL_SORT_OPTION = ".rating-ranking-view__popup-line"
+
+# MCP sort values → Yandex Maps UI labels
+SORT_LABELS: dict[str, str] = {
+    "by_time": "По новизне",
+    "by_rating": "Сначала положительные",
+}
+
 
 class YaReviewsScraper:
     """Manages browser via backend and parses Yandex Maps reviews from DOM."""
@@ -128,6 +139,8 @@ class YaReviewsScraper:
 
             # Determine total count from DOM
             total_count = company_info.review_count or 0
+
+            await self._apply_sort(page, sort)
 
             # Parse initial reviews
             all_reviews = await self._parse_reviews_from_dom(page, org_id)
@@ -210,6 +223,98 @@ class YaReviewsScraper:
             )
         except Exception:
             logger.warning("Reviews container did not appear in time")
+
+    @staticmethod
+    def _sort_label_for(sort: str) -> str | None:
+        """Map MCP sort parameter to the Yandex Maps dropdown label."""
+        return SORT_LABELS.get(sort)
+
+    async def _apply_sort(self, page: Page, sort: str) -> None:
+        """Open the sort dropdown and select the requested ordering."""
+        label = self._sort_label_for(sort)
+        if label is None:
+            logger.warning("Unknown sort %r, leaving Yandex default order", sort)
+            return
+
+        trigger = page.locator(SEL_SORT_TRIGGER).first
+        try:
+            await trigger.wait_for(state="visible", timeout=5000)
+        except Exception:
+            logger.warning("Sort control not found, leaving default order")
+            return
+
+        current = ((await trigger.text_content()) or "").strip()
+        if current == label:
+            logger.debug("Sort already set to %s", label)
+            return
+
+        first_date_before = await self._first_review_date(page)
+
+        await trigger.click()
+        try:
+            await page.locator(SEL_SORT_POPUP).wait_for(
+                state="visible",
+                timeout=5000,
+            )
+            await page.locator(
+                SEL_SORT_OPTION,
+                has_text=label,
+            ).first.click()
+        except Exception as exc:
+            logger.warning(
+                "Failed to select sort %s (%s): %s",
+                sort,
+                label,
+                exc,
+            )
+            return
+
+        try:
+            await page.wait_for_function(
+                """([selector, label]) => {
+                    const trigger = document.querySelector(selector);
+                    if (!trigger) return false;
+                    const text = (trigger.textContent || '').trim();
+                    return text === label;
+                }""",
+                arg=[SEL_SORT_TRIGGER, label],
+                timeout=10000,
+            )
+        except Exception:
+            logger.warning("Sort trigger did not update to %s", label)
+
+        if first_date_before is not None:
+            try:
+                await page.wait_for_function(
+                    """(previousDate) => {
+                        const dateEl = document.querySelector(
+                            '.business-reviews-card-view__review meta[itemprop=\"datePublished\"]'
+                        );
+                        if (!dateEl) return true;
+                        return dateEl.getAttribute('content') !== previousDate;
+                    }""",
+                    arg=first_date_before,
+                    timeout=10000,
+                )
+            except Exception:
+                logger.debug(
+                    "Review order unchanged after selecting %s", label,
+                )
+
+        await asyncio.sleep(self.config.request_delay)
+        await self._wait_for_reviews(page)
+
+    @staticmethod
+    async def _first_review_date(page: Page) -> str | None:
+        """Return ISO date of the first visible review, if any."""
+        return await page.evaluate("""
+            () => {
+                const dateEl = document.querySelector(
+                    '.business-reviews-card-view__review meta[itemprop=\"datePublished\"]'
+                );
+                return dateEl ? dateEl.getAttribute('content') : null;
+            }
+        """)
 
     async def _parse_company_info_from_dom(self, page: Page) -> CompanyInfo:
         """Extract company info from the page DOM."""

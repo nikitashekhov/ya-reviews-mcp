@@ -25,6 +25,20 @@ class TestExtractRating:
         assert YaReviewsScraper._extract_rating("Рейтинг") is None
 
 
+class TestSortLabelFor:
+    def test_by_time(self) -> None:
+        assert YaReviewsScraper._sort_label_for("by_time") == "По новизне"
+
+    def test_by_rating(self) -> None:
+        assert (
+            YaReviewsScraper._sort_label_for("by_rating")
+            == "Сначала положительные"
+        )
+
+    def test_unknown(self) -> None:
+        assert YaReviewsScraper._sort_label_for("by_relevance") is None
+
+
 class TestBuildReviewUrl:
     def test_valid_profile(self) -> None:
         url = YaReviewsScraper._build_review_url(
